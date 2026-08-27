@@ -2,7 +2,7 @@ name: Hydro & Weather Alert
 
 on:
   schedule:
-    # Uruchomienie co 30 minut (48 razy na dobę)
+    # Uruchomienie co 30 minut
     - cron: '*/30 * * * *'
   workflow_dispatch:
 
@@ -24,7 +24,7 @@ jobs:
       - name: Instalacja bibliotek
         run: pip install requests matplotlib
 
-      - name: Uruchomienie generatora i wysyłka alertu
+      - name: Uruchomienie skryptu i alertu
         env:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
         run: python alert.py
