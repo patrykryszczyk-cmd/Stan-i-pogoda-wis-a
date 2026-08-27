@@ -12,20 +12,19 @@ import matplotlib.dates as mdates
 import matplotlib.gridspec as gridspec
 
 # ==============================================================================
-# KONFIGURACJA SEKTORA OPERACYJNEGO (WISŁA - TORUŃ)
+# KONFIGURACJA POSTERUNKU (https://hydro.imgw.pl/#/station/hydro/153180090)
 # ==============================================================================
 NTFY_TOPIC = os.getenv("NTFY_TOPIC")
-HYDRO_STATION = "Toruń"
-HYDRO_RIVER = "Wisła"
+HYDRO_STATION_ID = "153180090"  # Precyzyjny ID stacji: Wisła - Toruń
 SYNOP_STATION = "Toruń"
 
-# Współrzędne stacji do precyzyjnej prognozy (Toruń)
-LATITUDE = 53.0138
-LONGITUDE = 18.5984
+# Współrzędne stacji do prognozy pogody i deszczu (Toruń)
+LATITUDE = 53.0078
+LONGITUDE = 18.6075
 
 # Progi wodowskazowe dla Wisły w Toruniu (w cm)
-STAN_SNW = 68          # Średni Niski Stan (strefa odsłoniętych mielizn)
-STAN_BEZPIECZNY = 120  # Minimum swobodnej żeglugi łodzi o większym zanurzeniu
+STAN_SNW = 68          # Średni Niski Stan (odsłonięte mielizny i ostrogi)
+STAN_BEZPIECZNY = 120  # Minimum swobodnej żeglugi łodzi
 STAN_OSTRZEGAWCZY = 530
 STAN_ALARMOWY = 650
 
@@ -36,23 +35,21 @@ TIMEZONE = ZoneInfo("Europe/Warsaw")
 # ==============================================================================
 
 def fetch_imgw_data():
-    """Pobiera dane ze stacji wodowskazowej i synoptycznej IMGW."""
+    """Pobiera dane bezpośrednio po identyfikatorze ID stacji IMGW."""
     hydro_match = None
     synop_match = None
 
-    # 1. IMGW Hydro - dokładne dopasowanie stacji i rzeki
+    # 1. IMGW Hydro - odczyt po ID 153180090
     try:
         r_hydro = requests.get("https://danepubliczne.imgw.pl/api/data/hydro/", timeout=10).json()
         for s in r_hydro:
-            stacja = s.get("stacja", "").strip().lower()
-            rzeka = s.get("rzeka", "").strip().lower()
-            if stacja == HYDRO_STATION.lower() and HYDRO_RIVER.lower() in rzeka:
+            if str(s.get("id_stacji")).strip() == HYDRO_STATION_ID:
                 hydro_match = s
                 break
     except Exception as e:
         print(f"[BŁĄD] Pobieranie IMGW Hydro: {e}")
 
-    # 2. IMGW Synop - dane meteorologiczne
+    # 2. IMGW Synop - dane pogodowe
     try:
         r_synop = requests.get("https://danepubliczne.imgw.pl/api/data/synop/", timeout=10).json()
         for s in r_synop:
@@ -65,7 +62,7 @@ def fetch_imgw_data():
     return hydro_match, synop_match
 
 def fetch_meteo_forecast():
-    """Pobiera dane o porywach wiatru, słońcu i deszczu z Open-Meteo."""
+    """Pobiera porywy wiatru, zmierzch i prognozę opadów z Open-Meteo."""
     try:
         url = (
             f"https://api.open-meteo.com/v1/forecast?"
@@ -73,8 +70,7 @@ def fetch_meteo_forecast():
             f"hourly=precipitation,precipitation_probability,wind_speed_10m,wind_gusts_10m,wind_direction_10m&"
             f"daily=sunrise,sunset&timezone=Europe%2FWarsaw&forecast_days=2"
         )
-        res = requests.get(url, timeout=10).json()
-        return res
+        return requests.get(url, timeout=10).json()
     except Exception as e:
         print(f"[BŁĄD] Pobieranie Open-Meteo: {e}")
         return None
@@ -106,35 +102,45 @@ def calculate_flow_rate(level):
     """Szacuje przepływ Q (m3/s) dla profilu Wisły w Toruniu."""
     if level <= 0:
         return 200
-    # Przybliżona krzywa przepływu dla wodowskazu Toruń
     q = 200 + (level ** 1.35) * 0.95
     return int(round(q, -1))
 
+def format_measurement_date(raw_date_str):
+    """Formatuje datę pomiaru IMGW (np. 2026-08-27 21:00:00 -> 27.08.2026, 21:00)."""
+    if not raw_date_str:
+        return datetime.now(TIMEZONE).strftime("%d.%m.%Y, %H:%M"), datetime.now(TIMEZONE).strftime("%H:%M")
+    try:
+        dt = datetime.strptime(raw_date_str.strip(), "%Y-%m-%d %H:%M:%S")
+        return dt.strftime("%d.%m.%Y, %H:%M"), dt.strftime("%H:%M")
+    except Exception:
+        return raw_date_str, ""
+
 def analyze_tactical_data(hydro, synop, meteo):
-    """Agreguje i przelicza parametry pod kątem działań ratowniczych."""
-    now_pl = datetime.now(TIMEZONE)
-    
-    # Stan wody i temperatura
+    # Stan wody i dokładny czas pomiaru
     stan = float(hydro.get("stan_wody", 78)) if hydro and hydro.get("stan_wody") else 78.0
+    stacja_nazwa = hydro.get("stacja", "Toruń") if hydro else "Toruń"
+    rzeka_nazwa = hydro.get("rzeka", "Wisła") if hydro else "Wisła"
+    
+    raw_data_pomiaru = hydro.get("stan_wody_data_pomiaru", "") if hydro else ""
+    data_pomiaru_pelna, godzina_pomiaru = format_measurement_date(raw_data_pomiaru)
+
     temp_w_raw = hydro.get("temperatura_wody") if hydro else None
     temp_woda = float(temp_w_raw) if temp_w_raw and temp_w_raw != "null" else 20.0
-    data_pomiaru = hydro.get("stan_wody_data_pomiaru", now_pl.strftime("%d.%m.%Y %H:%M")) if hydro else now_pl.strftime("%d.%m.%Y %H:%M")
 
-    # Przepływ
+    # Przepływ i nawigacja
     flow_q = calculate_flow_rate(stan)
     if flow_q < 450:
-        flow_note = "nurt słaby / umiarkowany"
+        flow_note = "nurt umiarkowany"
     elif flow_q < 1200:
         flow_note = "nurt wartki"
     else:
         flow_note = "BARDZO SILNY UCIĄG"
 
-    # Ryzyko nawigacyjne łodzi
     if stan < STAN_SNW:
-        nav_risk = "🚨 SKRAJNA NIŻÓWKA: Piaszczyska, ryzyko uszkodzenia śrub"
+        nav_risk = "🚨 SKRAJNA NIŻÓWKA: Piaszczyska, uwaga na śruby"
         nav_risk_color = "#EF4444"
     elif stan < STAN_BEZPIECZNY:
-        nav_risk = "⚠️ Ryzyko: Odsłonięte ostrogi, wypłycenia toru wodnego"
+        nav_risk = "⚠️ Ryzyko: Odsłonięte ostrogi i łachy piaskowe"
         nav_risk_color = "#F59E0B"
     elif stan >= STAN_OSTRZEGAWCZY:
         nav_risk = "🚨 Zagrożenie: Niesione pnie, wiry, zalane ostrogi"
@@ -143,7 +149,7 @@ def analyze_tactical_data(hydro, synop, meteo):
         nav_risk = "✅ Tor wodny: Stabilna głębokość żeglowna"
         nav_risk_color = "#10B981"
 
-    # ŚOI i Hipotermia
+    # Termika i ŚOI
     if temp_woda < 10.0:
         soi_text = "BEZWZGLĘDNIE SKAFANDER SUCHY (SUCHAR)"
         soi_color = "#EF4444"
@@ -161,13 +167,12 @@ def analyze_tactical_data(hydro, synop, meteo):
         soi_color = "#34D399"
         hypo_text = "> 6-12h (niska hipotermia)"
 
-    # Wiatr, porywy i falowanie
+    # Pogoda i wiatr
     temp_pow = float(synop.get("temperatura", 20.0)) if synop else 20.0
     wiatr_v = float(synop.get("predkosc_wiatru", 3.0)) if synop else 3.0
     kierunek_kat = float(synop.get("kierunek_wiatru", 290.0)) if synop else 290.0
     cisnienie = synop.get("cisnienie", "1016") if synop else "1016"
 
-    # Porywy z Open-Meteo
     porywy_v = wiatr_v * 1.6
     if meteo and "hourly" in meteo:
         gusts = meteo["hourly"].get("wind_gusts_10m", [])
@@ -175,8 +180,7 @@ def analyze_tactical_data(hydro, synop, meteo):
             porywy_v = max(float(gusts[0]), porywy_v)
     porywy_v = int(round(porywy_v))
 
-    # Analiza Wiatr vs Prąd Wisły (azymut koryta w Toruniu: ~300° NW)
-    # Wiatry z kierunków W, NW, N (250° - 350°) wieją POD PRĄD
+    # Analiza fali: wiatr pod prąd (NW/N)
     if 240 <= kierunek_kat <= 360 or 0 <= kierunek_kat <= 20:
         if wiatr_v >= 7 or porywy_v >= 12:
             wave_text = "🌊 SZKWAŁ POD PRĄD: Fala załamująca > 0.8m"
@@ -199,13 +203,13 @@ def analyze_tactical_data(hydro, synop, meteo):
             dt_dusk = dt_sunset + timedelta(minutes=38)
             dusk_str = dt_dusk.strftime("%H:%M")
 
-    # Status główny
+    # Główny status
     if stan >= STAN_ALARMOWY:
         status_text = "ALARM POWODZIOWY"
         status_bg = "#DC2626"
         status_border = "#EF4444"
     elif stan >= STAN_OSTRZEGAWCZY:
-        status_text = "STAN OSTRZEGAWCZY (WEZBRANIE)"
+        status_text = "STAN OSTRZEGAWCZY"
         status_bg = "#D97706"
         status_border = "#FBBF24"
     elif temp_woda < 10.0 and (wiatr_v >= 8 or porywy_v >= 14):
@@ -223,9 +227,12 @@ def analyze_tactical_data(hydro, synop, meteo):
 
     return {
         "stan": stan,
+        "stacja": stacja_nazwa,
+        "rzeka": rzeka_nazwa,
+        "data_pomiaru_pelna": data_pomiaru_pelna,
+        "godzina_pomiaru": godzina_pomiaru,
         "temp_woda": temp_woda,
         "temp_pow": temp_pow,
-        "data_pomiaru": data_pomiaru,
         "flow_q": flow_q,
         "flow_note": flow_note,
         "nav_risk": nav_risk,
@@ -278,14 +285,14 @@ def generate_tactical_card(tactical, rain_alert):
     ax_head = fig.add_subplot(gs[0, :])
     ax_head.set_facecolor("#0F172A")
     ax_head.axis("off")
-    ax_head.text(0.025, 0.68, f"BIULETYN OPERACYJNY RATOWNICTWA WODNEGO: WISŁA ({HYDRO_STATION.upper()})", fontsize=15, fontweight="bold", color="#FFFFFF")
-    ax_head.text(0.025, 0.24, f"Sektor: Wisła Dolna (km 735)  •  Odczyt IMGW: {tactical['data_pomiaru']}  •  Posterunek: {HYDRO_STATION} (Wisła)", fontsize=9.2, color="#94A3B8")
+    ax_head.text(0.025, 0.68, f"BIULETYN OPERACYJNY: {tactical['rzeka'].upper()} ({tactical['stacja'].upper()})", fontsize=15, fontweight="bold", color="#FFFFFF")
+    ax_head.text(0.025, 0.24, f"Stacja ID: {HYDRO_STATION_ID}  •  Pomiar IMGW: {tactical['data_pomiaru_pelna']}  •  Sektor: Wisła Dolna (km 735)", fontsize=9.2, color="#94A3B8")
     
     ax_head.text(0.975, 0.50, tactical['status_text'], fontsize=10, fontweight="bold", color="#FFFFFF",
                  ha="right", va="center",
                  bbox=dict(boxstyle="round,pad=0.55", facecolor=tactical['status_bg'], edgecolor=tactical['status_border'], linewidth=1.2))
 
-    # 2. KAFELEK 1: Hydro & Nawigacja
+    # 2. KAFELEK 1: Stan Wody i Odczyt
     ax_k1 = fig.add_subplot(gs[1, 0])
     ax_k1.set_facecolor("#0F172A")
     ax_k1.axis("off")
@@ -337,16 +344,14 @@ def generate_tactical_card(tactical, rain_alert):
     now_dt = datetime.now(TIMEZONE)
 
     if not dates or len(dates) < 2:
-        # Pomiary początkowe, jeśli baza jest świeża
         dates = [now_dt - timedelta(hours=i) for i in range(6, -1, -1)]
         levels = [tactical['stan']] * len(dates)
 
-    # Ograniczenie do ostatnich 48 wpisów
     dates = dates[-48:]
     levels = levels[-48:]
 
-    # Krzywa historyczna
-    ax_plot.plot(dates, levels, color="#38BDF8", linewidth=2.8, marker="o", markersize=3.5, label=f"Wodowskaz Wisła ({HYDRO_STATION})")
+    # Krzywa historii
+    ax_plot.plot(dates, levels, color="#38BDF8", linewidth=2.8, marker="o", markersize=3.5, label=f"Wodowskaz {tactical['stacja']} (ID {HYDRO_STATION_ID})")
     min_fill = max(0, min(levels) - 8)
     ax_plot.fill_between(dates, levels, min_fill, color="#38BDF8", alpha=0.15)
 
@@ -362,14 +367,14 @@ def generate_tactical_card(tactical, rain_alert):
 
     # Punkt bieżący
     ax_plot.scatter([dates[-1]], [levels[-1]], color="#F43F5E", s=70, zorder=6)
-    ax_plot.annotate(f"Bieżący: {int(levels[-1])} cm\n(Q ≈ {tactical['flow_q']} m³/s)", 
+    ann_time = tactical['godzina_pomiaru'] if tactical['godzina_pomiaru'] else dates[-1].strftime("%H:%M")
+    ax_plot.annotate(f"Bieżący ({ann_time}): {int(levels[-1])} cm\n(Q ≈ {tactical['flow_q']} m³/s)", 
                      xy=(dates[-1], levels[-1]), 
-                     xytext=(-95, 14), textcoords="offset points",
+                     xytext=(-105, 14), textcoords="offset points",
                      color="#FFFFFF", fontsize=8.5, fontweight="bold",
                      bbox=dict(boxstyle="round,pad=0.35", facecolor="#F43F5E", edgecolor="none"),
                      arrowprops=dict(arrowstyle="->", color="#F43F5E", lw=1.3))
 
-    # Linie referencyjne
     if max(levels) >= 400:
         ax_plot.axhline(STAN_OSTRZEGAWCZY, color="#F59E0B", linestyle="--", linewidth=1.2, label=f"Stan Ostrzegawczy ({STAN_OSTRZEGAWCZY} cm)")
         ax_plot.axhline(STAN_ALARMOWY, color="#EF4444", linestyle="-.", linewidth=1.2, label=f"Stan Alarmowy ({STAN_ALARMOWY} cm)")
@@ -435,7 +440,7 @@ if __name__ == "__main__":
     tactical = analyze_tactical_data(hydro_raw, synop_raw, meteo_raw)
     rain_alert = analyze_rain_alert(meteo_raw)
 
-    # Zapis do bazy i generowanie karty
+    # Zapis do historii i wygenerowanie karty
     update_history(tactical["stan"], tactical["temp_woda"])
     generate_tactical_card(tactical, rain_alert)
 
@@ -443,6 +448,7 @@ if __name__ == "__main__":
     dates, levels = get_history()
     last_stan = levels[-2] if len(levels) >= 2 else None
     current_stan = tactical["stan"]
+    time_label = f" (odczyt: {tactical['godzina_pomiaru']})" if tactical['godzina_pomiaru'] else ""
 
     is_morning = (now_pl.hour == 6 and now_pl.minute < 35)
     level_changed = (last_stan is None or current_stan != last_stan)
@@ -451,24 +457,24 @@ if __name__ == "__main__":
 
     if is_rain:
         print(f"[ALERT] Nadchodzący deszcz o {rain_alert['time']} ({rain_alert['amount']} mm)")
-        title = f"☔ [DESZCZ OK. {rain_alert['time']}] Opad: {rain_alert['amount']} mm | Wisła: {int(current_stan)} cm"
+        title = f"☔ [DESZCZ OK. {rain_alert['time']}] Opad: {rain_alert['amount']} mm | Wisła: {int(current_stan)} cm{time_label}"
         send_ntfy(title, priority="high", tags="umbrella,cloud_with_rain")
 
     elif is_morning:
         print("[RAPORT] Wysyłanie biuletynu porannego (06:00)...")
-        title = f"[PORANNY] Wisła ({HYDRO_STATION}): {int(current_stan)} cm | Woda: {tactical['temp_woda']}°C"
+        title = f"[PORANNY] Wisła ({tactical['stacja']}): {int(current_stan)} cm{time_label} | Woda: {tactical['temp_woda']}°C"
         send_ntfy(title, priority="default", tags="partly_sunny,speedboat")
 
     elif level_changed:
         diff_str = f" ({'+' if current_stan > last_stan else ''}{int(current_stan - last_stan)} cm)" if last_stan is not None else ""
-        print(f"[ZMIANA] Zmiana poziomu wody: {last_stan} -> {current_stan} cm")
-        title = f"[ZMIANA{diff_str}] Wisła ({HYDRO_STATION}): {int(current_stan)} cm | Q={tactical['flow_q']} m³/s"
+        print(f"[ZMIANA] Zmiana stanu wody: {last_stan} -> {current_stan} cm")
+        title = f"[ZMIANA{diff_str}] Wisła: {int(current_stan)} cm{time_label} | Q={tactical['flow_q']} m³/s"
         send_ntfy(title, priority="default", tags="chart_with_upwards_trend,droplet")
 
     elif is_high_water:
         print("[ALERT] Stan wysoki!")
-        title = f"🚨 [STAN OSTRZEGAWCZY] Wisła ({HYDRO_STATION}): {int(current_stan)} cm!"
+        title = f"🚨 [STAN OSTRZEGAWCZY] Wisła: {int(current_stan)} cm{time_label}!"
         send_ntfy(title, priority="urgent", tags="warning,rotating_light")
 
     else:
-        print(f"[INFO] Brak zmian na wodowskazie ({int(current_stan)} cm) i brak deszczu. Powiadomienie pominięte.")
+        print(f"[INFO] Brak zmian na stacji {HYDRO_STATION_ID} ({int(current_stan)} cm). Powiadomienie pominięte.")
