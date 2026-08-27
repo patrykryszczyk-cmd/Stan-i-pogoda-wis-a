@@ -2,7 +2,6 @@ name: Hydro & Weather Alert
 
 on:
   schedule:
-    # Uruchomienie co 30 minut
     - cron: '*/30 * * * *'
   workflow_dispatch:
 
@@ -21,8 +20,10 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Instalacja bibliotek
-        run: pip install requests matplotlib
+      - name: Instalacja bibliotek i wirtualnej przeglądarki
+        run: |
+          pip install requests matplotlib playwright
+          playwright install chromium --with-deps
 
       - name: Uruchomienie skryptu i alertu
         env:
