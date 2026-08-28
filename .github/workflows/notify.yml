@@ -2,7 +2,6 @@ name: Hydro & Weather Alert
 
 on:
   schedule:
-    # Uruchomienie co 30 minut (48 razy na dobę)
     - cron: '*/30 * * * *'
   workflow_dispatch:
 
@@ -15,6 +14,8 @@ jobs:
     steps:
       - name: Pobranie kodu
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Konfiguracja Pythona
         uses: actions/setup-python@v5
@@ -35,6 +36,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add raport.png history.csv last_level.txt morning_state.txt rain_state.txt || true
+          git pull --rebase origin main || true
+          git add -A
           git commit -m "Aktualizacja bazy i stanu operacyjnego [skip ci]" || echo "Brak zmian do zapisu"
-          git push
+          git push origin main
