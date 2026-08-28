@@ -14,7 +14,7 @@ import matplotlib.dates as mdates
 import matplotlib.gridspec as gridspec
 
 # ==============================================================================
-# KONFIGURACJA POSTERUNKU
+# KONFIGURACJA POSTERUNKU (WOPR TORUŃ - WISŁA)
 # ==============================================================================
 NTFY_TOPIC = os.getenv("NTFY_TOPIC")
 HYDRO_STATION_ID = "153180090"  # Wisła - Toruń
@@ -30,13 +30,14 @@ STAN_OSTRZEGAWCZY = 530
 STAN_ALARMOWY = 650
 
 HISTORY_FILE = "history.csv"
+LAST_LEVEL_FILE = "last_level.txt"
 RAIN_STATE_FILE = "rain_state.txt"
+MORNING_STATE_FILE = "morning_state.txt"
 CARD_FILE = "raport.png"
 TIMEZONE = ZoneInfo("Europe/Warsaw")
 # ==============================================================================
 
 def scrape_hydro_with_browser():
-    """Wirtualnie otwiera stronę hydro.imgw.pl i zczytuje live dane z DOM oraz przechwyconych pakietów."""
     stan = None
     temp_woda = None
     dt_pomiaru_str = None
@@ -50,7 +51,6 @@ def scrape_hydro_with_browser():
         )
         page = context.new_page()
 
-        # Przechwytywanie danych JSON wysyłanych przez backend IMGW do przeglądarki
         def handle_response(response):
             nonlocal stan, temp_woda, dt_pomiaru_str, flow_q, history_records
             try:
@@ -84,11 +84,10 @@ def scrape_hydro_with_browser():
         page.on("response", handle_response)
 
         try:
-            print(f"[BROWSER] Otwieram stronę {URL_HYDRO}...")
+            print(f"[BROWSER] Pobieranie {URL_HYDRO}...")
             page.goto(URL_HYDRO, wait_until="networkidle", timeout=35000)
-            page.wait_for_timeout(3000)  # Czekamy na pełne wyrenderowanie wykresów i kafelków
+            page.wait_for_timeout(3000)
 
-            # Jeśli przechwycenie pakietu nie złapało danych, parsujemy widoczny tekst strony
             if stan is None:
                 body_text = page.inner_text("body")
                 match_stan = re.search(r"(\d+)\s*cm", body_text)
@@ -104,7 +103,6 @@ def scrape_hydro_with_browser():
         finally:
             browser.close()
 
-    # Zapis historii z wirtualnej sesji
     if history_records:
         with open(HISTORY_FILE, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
@@ -112,7 +110,6 @@ def scrape_hydro_with_browser():
             for h_date, h_val in history_records:
                 writer.writerow([h_date, h_val, temp_woda or ""])
 
-    # Wartości domyślne, jeśli cokolwiek zawiodło
     if stan is None:
         stan = 78.0
     if temp_woda is None:
@@ -164,6 +161,7 @@ def analyze_rain_alert(meteo_data):
     for t_str, p_val, prob_val in zip(times, precip, prob):
         t = datetime.fromisoformat(t_str).replace(tzinfo=TIMEZONE)
         diff_mins = (t - now).total_seconds() / 60
+        # Wykrywa deszcz za 20 - 95 minut
         if 20 <= diff_mins <= 95:
             if (p_val and p_val >= 0.2) or (prob_val and prob_val >= 60):
                 return {
@@ -195,37 +193,35 @@ def analyze_tactical_data(hydro, synop, meteo):
     else:
         flow_note = "BARDZO SILNY UCIĄG"
 
-    # Ryzyko nautyczne
     if stan < STAN_SNW:
-        nav_risk = "🚨 SKRAJNA NIŻÓWKA: Piaszczyska, uwaga na śruby"
+        nav_risk = "(!) Odsłonięte ostrogi i mielizny"
         nav_risk_color = "#EF4444"
     elif stan < STAN_BEZPIECZNY:
-        nav_risk = "⚠️ Ryzyko: Odsłonięte ostrogi i łachy piaskowe"
+        nav_risk = "(!) Odsłonięte ostrogi i mielizny"
         nav_risk_color = "#F59E0B"
     elif stan >= STAN_OSTRZEGAWCZY:
-        nav_risk = "🚨 Zagrożenie: Niesione pnie, wiry, zalane ostrogi"
+        nav_risk = "(!) Niesione pnie, wiry, zalane główki"
         nav_risk_color = "#EF4444"
     else:
-        nav_risk = "✅ Tor wodny: Stabilna głębokość żeglowna"
+        nav_risk = "Tor wodny: Głębokość żeglowna"
         nav_risk_color = "#10B981"
 
-    # Termika i ŚOI
     if temp_woda < 10.0:
-        soi_text = "BEZWZGLĘDNIE SKAFANDER SUCHY (SUCHAR)"
+        soi_text = "ŚOI: BEZWZGLĘDNIE SUCHAR"
         soi_color = "#EF4444"
-        hypo_text = "< 15-30 min do utraty sił!"
+        hypo_text = "Hipotermia: < 15-30 min!"
     elif temp_woda < 15.0:
-        soi_text = "Suchar lub Pianka 5mm+ (krótki czas)"
+        soi_text = "ŚOI: Suchar / Pianka 5mm+"
         soi_color = "#F59E0B"
-        hypo_text = "ok. 1-2h (wysokie ryzyko)"
+        hypo_text = "Okno hipotermii: ok. 1-2h"
     elif temp_woda < 19.0:
-        soi_text = "Pianka 3-5mm / Kamizelka asekuracyjna"
+        soi_text = "ŚOI: Pianka 3-5mm / Kamizelka"
         soi_color = "#FBBF24"
-        hypo_text = "ok. 2-6h (umiarkowane)"
+        hypo_text = "Okno hipotermii: ok. 2-6h"
     else:
-        soi_text = "Pianka lekka 3mm / Kamizelka 50N"
+        soi_text = "ŚOI: Pianka 3mm / Asekuracja"
         soi_color = "#34D399"
-        hypo_text = "> 6-12h (niska hipotermia)"
+        hypo_text = "Okno hipotermii: > 6-12h"
 
     temp_pow = float(synop.get("temperatura", 20.0)) if synop else 20.0
     wiatr_v = float(synop.get("predkosc_wiatru", 3.0)) if synop else 3.0
@@ -238,16 +234,15 @@ def analyze_tactical_data(hydro, synop, meteo):
         if gusts:
             porywy_v = max(int(round(float(gusts[0]))), porywy_v)
 
-    # Fala: wiatr pod prąd (NW/N)
     if 240 <= kierunek_kat <= 360 or 0 <= kierunek_kat <= 20:
         if wiatr_v >= 7 or porywy_v >= 12:
-            wave_text = "🌊 SZKWAŁ POD PRĄD: Fala załamująca > 0.8m"
+            wave_text = "~ SZKWAŁ POD PRĄD (Fala >0.8m)"
             wave_color = "#EF4444"
         else:
-            wave_text = "🌊 Wiatr pod prąd: Krótka fala rzeczna, bryzgi"
+            wave_text = "~ Wiatr pod prąd (krótka fala)"
             wave_color = "#38BDF8"
     else:
-        wave_text = "🌊 Wiatr z prądem: Spłaszczona fala, szybszy dryf"
+        wave_text = "~ Wiatr z prądem (szybki dryf)"
         wave_color = "#34D399"
 
     sunset_str = "20:00"
@@ -324,67 +319,76 @@ def get_history():
     return dates, levels
 
 def generate_tactical_card(tactical, rain_alert):
-    fig = plt.figure(figsize=(11.5, 8.2), dpi=180, facecolor="#070B14")
-    gs = gridspec.GridSpec(3, 4, height_ratios=[1.1, 1.45, 2.4], figure=fig)
+    fig = plt.figure(figsize=(12, 8.4), dpi=200, facecolor="#060913")
+    
+    # ZNAK WODNY W TLE
+    fig.text(0.50, 0.48, "WOPR TORUŃ", fontsize=72, fontweight="black", 
+             color="#38BDF8", alpha=0.035, ha="center", va="center", rotation=14)
+
+    gs = gridspec.GridSpec(3, 4, height_ratios=[1.15, 1.5, 2.35], figure=fig)
 
     # 1. NAGŁÓWEK
     ax_head = fig.add_subplot(gs[0, :])
-    ax_head.set_facecolor("#0F172A")
+    ax_head.set_facecolor("#0D1527")
     ax_head.axis("off")
-    ax_head.text(0.025, 0.68, f"BIULETYN OPERACYJNY: {tactical['rzeka'].upper()} ({tactical['stacja'].upper()})", fontsize=15, fontweight="bold", color="#FFFFFF")
-    ax_head.text(0.025, 0.24, f"Stacja ID: {HYDRO_STATION_ID}  •  Odczyt IMGW: {tactical['data_pomiaru_pelna']}  •  Sektor: Wisła Dolna (km 735)", fontsize=9.2, color="#94A3B8")
+    ax_head.text(0.025, 0.72, "WOPR TORUŃ  •  BIULETYN OPERACYJNY", fontsize=15.5, fontweight="bold", color="#FFFFFF")
+    ax_head.text(0.025, 0.28, f"Sektor: Wisła Dolna (km 735)  |  Wodowskaz IMGW: {HYDRO_STATION_ID}  |  Odczyt: {tactical['data_pomiaru_pelna']}", fontsize=9.2, color="#94A3B8")
     
-    ax_head.text(0.975, 0.50, tactical['status_text'], fontsize=10, fontweight="bold", color="#FFFFFF",
+    ax_head.text(0.975, 0.50, tactical['status_text'], fontsize=9.5, fontweight="bold", color="#FFFFFF",
                  ha="right", va="center",
                  bbox=dict(boxstyle="round,pad=0.55", facecolor=tactical['status_bg'], edgecolor=tactical['status_border'], linewidth=1.2))
 
     # 2. STAN WODY
     ax_k1 = fig.add_subplot(gs[1, 0])
-    ax_k1.set_facecolor("#0F172A")
+    ax_k1.set_facecolor("#0D1527")
     ax_k1.axis("off")
-    ax_k1.text(0.5, 0.85, "STAN WODY & PRZEPŁYW", fontsize=8.8, fontweight="bold", color="#94A3B8", ha="center")
-    ax_k1.text(0.5, 0.52, f"{int(tactical['stan'])} cm", fontsize=23, fontweight="bold", color="#38BDF8", ha="center")
-    ax_k1.text(0.5, 0.24, f"Przepływ Q: {tactical['flow_q']} m³/s ({tactical['flow_note']})", fontsize=7.8, fontweight="semibold", color="#E2E8F0", ha="center")
-    ax_k1.text(0.5, 0.08, tactical['nav_risk'], fontsize=7.5, fontweight="bold", color=tactical['nav_risk_color'], ha="center")
+    ax_k1.text(0.5, 0.86, "STAN WODY & PRZEPŁYW", fontsize=8.5, fontweight="bold", color="#8E9AA8", ha="center")
+    ax_k1.text(0.5, 0.55, f"{int(tactical['stan'])} cm", fontsize=24, fontweight="bold", color="#38BDF8", ha="center")
+    ax_k1.text(0.5, 0.28, f"Q: {tactical['flow_q']} m³/s • {tactical['flow_note']}", fontsize=7.8, fontweight="semibold", color="#E2E8F0", ha="center")
+    ax_k1.text(0.5, 0.10, tactical['nav_risk'], fontsize=7.3, fontweight="bold", color=tactical['nav_risk_color'], ha="center")
 
     # 3. TERMIKA I ŚOI
     ax_k2 = fig.add_subplot(gs[1, 1])
-    ax_k2.set_facecolor("#0F172A")
+    ax_k2.set_facecolor("#0D1527")
     ax_k2.axis("off")
-    ax_k2.text(0.5, 0.85, "TERMIKA & ŚOI ZAŁOGI", fontsize=8.8, fontweight="bold", color="#94A3B8", ha="center")
-    ax_k2.text(0.5, 0.52, f"{tactical['temp_woda']:.1f} °C", fontsize=23, fontweight="bold", color="#10B981" if tactical['temp_woda'] >= 18 else "#38BDF8", ha="center")
-    ax_k2.text(0.5, 0.24, f"Zalecany ŚOI: {tactical['soi_text']}", fontsize=7.6, fontweight="bold", color=tactical['soi_color'], ha="center")
-    ax_k2.text(0.5, 0.08, f"Okno hipotermii: {tactical['hypo_text']}", fontsize=7.4, color="#94A3B8", ha="center")
+    ax_k2.text(0.5, 0.86, "TERMIKA & ŚOI ZAŁOGI", fontsize=8.5, fontweight="bold", color="#8E9AA8", ha="center")
+    ax_k2.text(0.5, 0.55, f"{tactical['temp_woda']:.1f} °C", fontsize=24, fontweight="bold", color="#10B981" if tactical['temp_woda'] >= 18 else "#38BDF8", ha="center")
+    ax_k2.text(0.5, 0.28, tactical['soi_text'], fontsize=7.6, fontweight="bold", color=tactical['soi_color'], ha="center")
+    ax_k2.text(0.5, 0.10, tactical['hypo_text'], fontsize=7.4, color="#94A3B8", ha="center")
 
     # 4. WIATR I FALOWANIE
     ax_k3 = fig.add_subplot(gs[1, 2])
-    ax_k3.set_facecolor("#0F172A")
+    ax_k3.set_facecolor("#0D1527")
     ax_k3.axis("off")
-    ax_k3.text(0.5, 0.85, "WIATR & FALOWANIE", fontsize=8.8, fontweight="bold", color="#94A3B8", ha="center")
-    ax_k3.text(0.5, 0.52, f"{tactical['wiatr_v']} m/s", fontsize=23, fontweight="bold", color="#A78BFA", ha="center")
-    ax_k3.text(0.5, 0.24, f"Porywy: {tactical['porywy_v']} m/s • {tactical['cisnienie']} hPa", fontsize=7.8, fontweight="semibold", color="#C4B5FD", ha="center")
-    ax_k3.text(0.5, 0.08, tactical['wave_text'], fontsize=7.4, fontweight="bold", color=tactical['wave_color'], ha="center")
+    ax_k3.text(0.5, 0.86, "WIATR & WARUNKI", fontsize=8.5, fontweight="bold", color="#8E9AA8", ha="center")
+    ax_k3.text(0.5, 0.55, f"{tactical['wiatr_v']} m/s", fontsize=24, fontweight="bold", color="#A78BFA", ha="center")
+    ax_k3.text(0.5, 0.28, f"Porywy: {tactical['porywy_v']} m/s • {tactical['cisnienie']} hPa", fontsize=7.6, fontweight="semibold", color="#C4B5FD", ha="center")
+    ax_k3.text(0.5, 0.10, tactical['wave_text'], fontsize=7.4, fontweight="bold", color=tactical['wave_color'], ha="center")
 
-    # 5. ŚWIATŁO I DESZCZ
+    # 5. ŚWIATŁO I OKNO OPERACYJNE
     ax_k4 = fig.add_subplot(gs[1, 3])
-    ax_k4.set_facecolor("#0F172A")
+    ax_k4.set_facecolor("#0D1527")
     ax_k4.axis("off")
-    ax_k4.text(0.5, 0.85, "ŚWIATŁO & METEO", fontsize=8.8, fontweight="bold", color="#94A3B8", ha="center")
-    ax_k4.text(0.5, 0.52, tactical['sunset'], fontsize=21, fontweight="bold", color="#FBBF24", ha="center")
-    ax_k4.text(0.5, 0.24, f"Zmierzch wzrokowy: {tactical['dusk']}", fontsize=7.8, fontweight="semibold", color="#FDE68A", ha="center")
+    ax_k4.text(0.5, 0.86, "ŚWIATŁO & METEO", fontsize=8.5, fontweight="bold", color="#8E9AA8", ha="center")
+    ax_k4.text(0.5, 0.55, tactical['sunset'], fontsize=22, fontweight="bold", color="#FBBF24", ha="center")
+    ax_k4.text(0.5, 0.28, f"Zmierzch cywilny: {tactical['dusk']}", fontsize=7.8, fontweight="semibold", color="#FDE68A", ha="center")
     
     if rain_alert:
-        ax_k4.text(0.5, 0.08, f"🌧️ Deszcz ok. {rain_alert['time']} ({rain_alert['amount']} mm)", fontsize=7.4, fontweight="bold", color="#38BDF8", ha="center")
+        ax_k4.text(0.5, 0.10, f"Deszcz ok. {rain_alert['time']} ({rain_alert['amount']} mm)", fontsize=7.4, fontweight="bold", color="#38BDF8", ha="center")
     else:
-        ax_k4.text(0.5, 0.08, f"Temp. pow: {tactical['temp_pow']}°C • Brak opadów", fontsize=7.4, color="#94A3B8", ha="center")
+        ax_k4.text(0.5, 0.10, f"Powietrze: {tactical['temp_pow']}°C • Brak opadów", fontsize=7.4, color="#94A3B8", ha="center")
 
     for ax in [ax_head, ax_k1, ax_k2, ax_k3, ax_k4]:
-        rect = plt.Rectangle((0, 0), 1, 1, transform=ax.transAxes, fill=False, edgecolor="#1E293B", linewidth=1.2, clip_on=False)
+        rect = plt.Rectangle((0, 0), 1, 1, transform=ax.transAxes, fill=False, edgecolor="#1B253B", linewidth=1.2, clip_on=False)
         ax.add_patch(rect)
 
     # 6. WYKRES
     ax_plot = fig.add_subplot(gs[2, :])
-    ax_plot.set_facecolor("#0F172A")
+    ax_plot.set_facecolor("#0D1527")
+
+    ax_plot.text(0.5, 0.5, "WOPR TORUŃ", transform=ax_plot.transAxes,
+                 fontsize=46, fontweight="black", color="#38BDF8", alpha=0.04,
+                 ha="center", va="center", rotation=8)
 
     dates, levels = get_history()
     now_dt = datetime.now(TIMEZONE)
@@ -396,7 +400,7 @@ def generate_tactical_card(tactical, rain_alert):
     dates = dates[-48:]
     levels = levels[-48:]
 
-    ax_plot.plot(dates, levels, color="#38BDF8", linewidth=2.8, marker="o", markersize=3.5, label=f"Wodowskaz Wisła ({HYDRO_STATION_ID})")
+    ax_plot.plot(dates, levels, color="#38BDF8", linewidth=2.8, marker="o", markersize=3.5, label=f"Wodowskaz Toruń (Wisła)")
     min_fill = max(0, min(levels) - 8)
     ax_plot.fill_between(dates, levels, min_fill, color="#38BDF8", alpha=0.15)
 
@@ -409,7 +413,6 @@ def generate_tactical_card(tactical, rain_alert):
     ax_plot.plot(all_proj_t, all_proj_l, color="#FBBF24", linewidth=2.2, linestyle="--", marker="s", markersize=3, label="Projekcja trendu (24h)")
     ax_plot.fill_between(all_proj_t, all_proj_l, min_fill, color="#FBBF24", alpha=0.07)
 
-    # Punkt aktualny
     ax_plot.scatter([dates[-1]], [levels[-1]], color="#F43F5E", s=70, zorder=6)
     ann_time = tactical['godzina_pomiaru'] if tactical['godzina_pomiaru'] else dates[-1].strftime("%H:%M")
     ax_plot.annotate(f"Bieżący ({ann_time}): {int(levels[-1])} cm\n(Q ≈ {tactical['flow_q']} m³/s)", 
@@ -434,27 +437,87 @@ def generate_tactical_card(tactical, rain_alert):
     y_min = max(0, min(min(levels), min(proj_levels)) - 10)
     y_max = max(max(levels), max(proj_levels)) + 20
     ax_plot.set_ylim(y_min, max(y_max, STAN_BEZPIECZNY + 10))
-    ax_plot.legend(loc="upper left", facecolor="#1E293B", edgecolor="#334155", fontsize=8, labelcolor="#E2E8F0")
+    ax_plot.legend(loc="upper left", facecolor="#141E33", edgecolor="#263554", fontsize=8, labelcolor="#E2E8F0")
+
+    ax_plot.text(0.99, 0.03, "Jednostka Ratownictwa Wodnego • WOPR Toruń", transform=ax_plot.transAxes,
+                 fontsize=7.5, color="#64748B", ha="right", va="bottom", fontstyle="italic")
 
     for spine in ax_plot.spines.values():
-        spine.set_edgecolor("#1E293B")
+        spine.set_edgecolor("#1B253B")
         spine.set_linewidth(1.2)
 
     plt.subplots_adjust(hspace=0.32, wspace=0.14, left=0.045, right=0.955, top=0.95, bottom=0.08)
     plt.savefig(CARD_FILE, facecolor=fig.get_facecolor(), edgecolor="none")
     plt.close()
 
-def should_send_rain_alert(rain_info):
+# ==============================================================================
+# BLOKADA POWTÓRZEŃ I LOGIKA POWIADOMIEŃ
+# ==============================================================================
+def check_level_change(current_stan):
+    """Zwraca (czy_zmieniony, poprzedni_stan)."""
+    if not os.path.exists(LAST_LEVEL_FILE):
+        with open(LAST_LEVEL_FILE, "w", encoding="utf-8") as f:
+            f.write(str(current_stan))
+        return False, current_stan
+
+    try:
+        with open(LAST_LEVEL_FILE, "r", encoding="utf-8") as f:
+            content = f.read().strip()
+            if content:
+                prev = float(content)
+                if prev != current_stan:
+                    return True, prev
+                return False, prev
+    except Exception:
+        pass
+    return False, current_stan
+
+def save_current_level(current_stan):
+    with open(LAST_LEVEL_FILE, "w", encoding="utf-8") as f:
+        f.write(str(current_stan))
+
+def is_morning_report_due():
+    """Zwraca True dokładnie raz dziennie w oknie 05:45 - 09:00."""
+    now_pl = datetime.now(TIMEZONE)
+    in_window = (now_pl.hour == 5 and now_pl.minute >= 45) or (6 <= now_pl.hour <= 8)
+    if not in_window:
+        return False
+    
+    today_str = now_pl.strftime("%Y-%m-%d")
+    if os.path.exists(MORNING_STATE_FILE):
+        try:
+            with open(MORNING_STATE_FILE, "r", encoding="utf-8") as f:
+                if f.read().strip() == today_str:
+                    return False
+        except Exception:
+            pass
+    return True
+
+def mark_morning_report_sent():
+    today_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
+    with open(MORNING_STATE_FILE, "w", encoding="utf-8") as f:
+        f.write(today_str)
+
+def is_rain_alert_due(rain_info):
+    """Zwraca True tylko 1 raz na dane pasmo deszczowe."""
     if not rain_info:
         return False
     state_key = f"{datetime.now(TIMEZONE).strftime('%Y-%m-%d')}_{rain_info['time']}"
     if os.path.exists(RAIN_STATE_FILE):
-        with open(RAIN_STATE_FILE, "r", encoding="utf-8") as f:
-            if f.read().strip() == state_key:
-                return False
+        try:
+            with open(RAIN_STATE_FILE, "r", encoding="utf-8") as f:
+                if f.read().strip() == state_key:
+                    return False
+        except Exception:
+            pass
+    return True
+
+def mark_rain_alert_sent(rain_info):
+    if not rain_info:
+        return
+    state_key = f"{datetime.now(TIMEZONE).strftime('%Y-%m-%d')}_{rain_info['time']}"
     with open(RAIN_STATE_FILE, "w", encoding="utf-8") as f:
         f.write(state_key)
-    return True
 
 def send_ntfy(title, priority="default", tags="chart_with_upwards_trend,droplet"):
     if not NTFY_TOPIC:
@@ -475,7 +538,11 @@ def send_ntfy(title, priority="default", tags="chart_with_upwards_trend,droplet"
             )
 
 if __name__ == "__main__":
-    now_pl = datetime.now(TIMEZONE)
+    # Upewniamy się, że pliki stanu zawsze istnieją
+    for fname in [LAST_LEVEL_FILE, RAIN_STATE_FILE, MORNING_STATE_FILE]:
+        if not os.path.exists(fname):
+            open(fname, "a", encoding="utf-8").close()
+
     hydro_raw = scrape_hydro_with_browser()
     synop_raw = fetch_synop_data()
     meteo_raw = fetch_meteo_forecast()
@@ -485,32 +552,48 @@ if __name__ == "__main__":
 
     generate_tactical_card(tactical, rain_alert)
 
-    dates, levels = get_history()
-    last_stan = levels[-2] if len(levels) >= 2 else None
     current_stan = tactical["stan"]
     time_label = f" ({tactical['godzina_pomiaru']})" if tactical['godzina_pomiaru'] else ""
 
-    is_morning = (now_pl.hour == 6 and now_pl.minute < 35)
-    level_changed = (last_stan is None or current_stan != last_stan)
+    morning_due = is_morning_report_due()
+    rain_due = is_rain_alert_due(rain_alert)
+    level_changed, prev_stan = check_level_change(current_stan)
     is_high_water = (current_stan >= STAN_OSTRZEGAWCZY)
-    is_rain = should_send_rain_alert(rain_alert)
 
-    if is_rain:
+    # 1. BEZWZGLĘDNY PRIORYTET: Biuletyn poranny o 6:00 (niezależnie od stanu wody)
+    if morning_due:
+        print("[RAPORT] Wysyłanie biuletynu porannego WOPR (06:00)...")
+        rain_addon = f" | 🌧️ Deszcz ok. {rain_alert['time']}" if rain_alert else ""
+        title = f"[PORANNY] Wisła ({tactical['stacja']}): {int(current_stan)} cm{time_label} | Woda: {tactical['temp_woda']}°C{rain_addon}"
+        send_ntfy(title, priority="default", tags="partly_sunny,speedboat")
+        mark_morning_report_sent()
+        save_current_level(current_stan)
+
+    # 2. Ostrzeżenie przed deszczem (dokładnie 1 powiadomienie na dane zjawisko)
+    elif rain_due:
+        print(f"[ALERT] Nadchodzący deszcz o {rain_alert['time']} ({rain_alert['amount']} mm)...")
         title = f"☔ [DESZCZ OK. {rain_alert['time']}] Opad: {rain_alert['amount']} mm | Wisła: {int(current_stan)} cm{time_label}"
         send_ntfy(title, priority="high", tags="umbrella,cloud_with_rain")
+        mark_rain_alert_sent(rain_alert)
+        save_current_level(current_stan)
 
-    elif is_morning:
-        title = f"[PORANNY] Wisła ({tactical['stacja']}): {int(current_stan)} cm{time_label} | Woda: {tactical['temp_woda']}°C"
-        send_ntfy(title, priority="default", tags="partly_sunny,speedboat")
-
-    elif level_changed:
-        diff_str = f" ({'+' if current_stan > last_stan else ''}{int(current_stan - last_stan)} cm)" if last_stan is not None else ""
-        title = f"[ZMIANA{diff_str}] Wisła: {int(current_stan)} cm{time_label} | Q={tactical['flow_q']} m³/s"
-        send_ntfy(title, priority="default", tags="chart_with_upwards_trend,droplet")
-
+    # 3. Stan ostrzegawczy / alarmowy
     elif is_high_water:
+        print("[ALERT] Stan wody wysoki!")
         title = f"🚨 [STAN OSTRZEGAWCZY] Wisła: {int(current_stan)} cm{time_label}!"
         send_ntfy(title, priority="urgent", tags="warning,rotating_light")
+        save_current_level(current_stan)
 
+    # 4. Zmiana poziomu wody (wzrost / spadek o minimum 1 cm)
+    elif level_changed:
+        diff_val = int(current_stan - prev_stan)
+        diff_str = f" ({'+' if diff_val > 0 else ''}{diff_val} cm)"
+        print(f"[ZMIANA] Zmiana poziomu wody: {prev_stan} -> {current_stan} cm")
+        title = f"[ZMIANA{diff_str}] Wisła: {int(current_stan)} cm{time_label} | Q={tactical['flow_q']} m³/s"
+        send_ntfy(title, priority="default", tags="chart_with_upwards_trend,droplet")
+        save_current_level(current_stan)
+
+    # 5. Stan stabilny, brak deszczu i to nie jest poranek -> Pełna cisza
     else:
-        print(f"[INFO] Brak zmian na stacji {HYDRO_STATION_ID} ({int(current_stan)} cm).")
+        print(f"[INFO] Poziom wody bez zmian ({int(current_stan)} cm). Raport poranny zrealizowany. Powiadomienie pominięte.")
+        save_current_level(current_stan)
