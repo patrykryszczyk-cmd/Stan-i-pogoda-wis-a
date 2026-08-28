@@ -2,6 +2,7 @@ name: Hydro & Weather Alert
 
 on:
   schedule:
+    # Uruchomienie co 30 minut (48 razy na dobę)
     - cron: '*/30 * * * *'
   workflow_dispatch:
 
@@ -30,10 +31,10 @@ jobs:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
         run: python alert.py
 
-      - name: Zapis historii i stanu do repozytorium
+      - name: Zapis historii i stanu operacyjnego do repozytorium
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git commit -m "Aktualizacja stanu i historii [skip ci]" || echo "Brak zmian do zapisu"
+          git add raport.png history.csv last_level.txt morning_state.txt rain_state.txt || true
+          git commit -m "Aktualizacja bazy i stanu operacyjnego [skip ci]" || echo "Brak zmian do zapisu"
           git push
