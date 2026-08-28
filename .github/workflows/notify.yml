@@ -30,10 +30,10 @@ jobs:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
         run: python alert.py
 
-      - name: Zapis historii pomiarów do repozytorium
+      - name: Zapis historii i stanu do repozytorium
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add history.csv rain_state.txt || true
-          git commit -m "Aktualizacja historii [skip ci]" || echo "Brak zmian"
+          git add -A
+          git commit -m "Aktualizacja stanu i historii [skip ci]" || echo "Brak zmian do zapisu"
           git push
